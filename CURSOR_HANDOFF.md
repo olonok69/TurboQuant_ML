@@ -2,6 +2,8 @@
 
 You are picking up a TurboQuant demo project. The code is done and partly tested. The sandbox it was built in could not reach Hugging Face, so **no real model or real dataset was ever downloaded**, and the LLM quality numbers were never measured. Your job is to download those assets, run the tests below, fix anything that breaks, and report the numbers.
 
+> **Execution rule (agreed with the owner): the notebooks run only on Google Colab, never on this machine.** The local GPU is too small. Locally you may edit code, rebuild the notebooks (`python build_notebooks.py`) and run CPU-only checks such as T1. For T2 and T3, upload the notebook to Colab (T4 runtime for the LLM demo; CPU is fine for vector search), run it there, then download the executed notebook (File › Download › Download .ipynb) and every table it prints into `results/` in this folder. Results that stay only in Colab or Drive cannot be reviewed.
+
 ## 1. What is in this folder
 
 | File | Purpose |
@@ -30,45 +32,29 @@ Verified in the sandbox (CPU, 4 threads):
 
 ## 3. Environment
 
-```bash
-python -m venv .venv && source .venv/bin/activate   # Python 3.10-3.12
-pip install -U pip
-pip install torch                                   # CUDA build if you have a GPU
-pip install "transformers>=5.0,<6" accelerate datasets huggingface_hub \
-            faiss-cpu turbovec scikit-learn matplotlib pandas jupyter nbclient jupytext
-python -c "import torch, transformers, faiss, turbovec; print(torch.__version__, transformers.__version__, torch.cuda.is_available())"
-```
+**Colab (T2, T3).** Nothing to install by hand: the first cells of each notebook install what they need (transformers v5, datasets, faiss-cpu, turbovec, scikit-learn). Models and datasets download inside the Colab runtime, not on this machine. `turbovec` needs an x86-64 CPU with AVX2, which Colab has; if its install fails anyway, skip its cells and note it.
 
-`turbovec` needs an x86-64 CPU with AVX2 (or ARM NEON). If `pip install turbovec` fails, skip its cells and note it.
-
-## 4. Downloads
+**Local (editing and T1 only).** The project `.venv` already has CPU-only torch and numpy:
 
 ```bash
-# Models (about 3 GB and 1 GB)
-huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct
-huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
-
-# Perplexity text
-python -c "from datasets import load_dataset; d=load_dataset('wikitext','wikitext-2-raw-v1',split='test'); print(len(d))"
-
-# Paper's vector dataset: check the column names first
-python - <<'EOF'
-from datasets import load_dataset
-ds = load_dataset("Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M", split="train", streaming=True)
-row = next(iter(ds))
-print({k: (type(v).__name__, len(v) if isinstance(v, list) else v) for k, v in row.items()})
-EOF
+.venv/Scripts/python -c "import torch; print(torch.__version__)"   # Windows; .venv/bin/python under Linux/WSL
 ```
 
-The vector notebook auto-detects the embedding column (the first list with 256 or more floats). If the printout shows otherwise, fix `load_dbpedia()` in `vector_search_demo.py/.ipynb`.
+Do not download the Qwen models or the DBpedia vectors locally.
 
-Optional: cache 101,000 rows to `dbpedia1536_101k.npy` once, then set `DATASET = "dbpedia1536_101k.npy"` (the notebook accepts a local `.npy` path) so reruns skip the download.
+## 4. Data used by the notebooks (downloaded in Colab)
+
+- Models: `Qwen/Qwen2.5-1.5B-Instruct` on the T4 (the notebook falls back to `Qwen2.5-0.5B-Instruct` only on CPU).
+- Perplexity text: `wikitext`, `wikitext-2-raw-v1`, test split.
+- Vector dataset: `Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M`, streamed (101,000 rows).
+
+The vector notebook auto-detects the embedding column (the first list with 256 or more floats) and prints its name. If that printout looks wrong, fix `load_dbpedia()` in `vector_search_demo.py`, rebuild with `python build_notebooks.py`, and upload again.
 
 ## 5. Tests to run
 
-Save every output table as CSV under `results/` (create it) and keep executed notebooks as `results/*_executed.ipynb`.
+Save every output table as CSV under `results/` (create it) and keep the executed notebooks, downloaded from Colab, as `results/*_executed.ipynb`. In Colab, a table can be saved with `df.to_csv("name.csv")` and downloaded from the Files pane, or copied from the cell output.
 
-### T1. Core sanity (about 1 minute, CPU)
+### T1. Core sanity (about 1 minute, local CPU, already passed on 2026-10-05)
 
 ```bash
 python - <<'EOF'
@@ -84,16 +70,12 @@ print("T1 OK")
 EOF
 ```
 
-### T2. LLM notebook on a GPU (main task)
+### T2. LLM notebook on Colab, T4 GPU (main task)
 
-```bash
-jupyter nbconvert --to notebook --execute llm_kv_cache_demo.ipynb \
-  --output results/llm_kv_cache_demo_executed.ipynb --ExecutePreprocessor.timeout=3600
-```
-
-On CPU only, it switches to Qwen2.5-0.5B, 512 tokens and short haystacks automatically. That is fine as a smoke test, but report GPU numbers if you can.
-
-The first cell upgrades transformers if it is older than v5. If that happens inside a running kernel, restart and run again.
+1. colab.research.google.com › File › Upload notebook › `llm_kv_cache_demo.ipynb`.
+2. Runtime › Change runtime type › **T4 GPU**. Check the second code cell prints `device: cuda`; a CPU runtime silently switches to Qwen2.5-0.5B with short inputs, and those numbers are not the ones we want.
+3. Runtime › Run all. The first cell upgrades transformers if Colab ships an older one; if it prints "Please restart the runtime", do Runtime › Restart session, then Run all again.
+4. File › Download › Download .ipynb, save as `results/llm_kv_cache_demo_executed.ipynb`.
 
 Record:
 - **Quality table** (section 3): `bits_per_channel`, `compression`, `perplexity`, `KL_vs_baseline`, `top1_agree` for all 10 configs.
@@ -112,12 +94,11 @@ If something fails:
 - Out of memory at 8k tokens on a T4: lower `LENGTHS` to `[2000, 4000, 6000]`.
 - Qwen2.5 has strong key outliers. If 2-bit quality is catastrophic, try `residual_length=32` in `make_cache` as an extra row, and report both.
 
-### T3. Vector search on the paper's dataset (CPU is fine)
+### T3. Vector search on Colab (CPU runtime is fine)
 
-```bash
-jupyter nbconvert --to notebook --execute vector_search_demo.ipynb \
-  --output results/vector_search_demo_executed.ipynb --ExecutePreprocessor.timeout=7200
-```
+1. Upload `vector_search_demo.ipynb` to Colab; the default CPU runtime is enough (a GPU only speeds up the PyTorch scorer).
+2. Runtime › Run all. Streaming 101,000 DBpedia rows takes a few minutes.
+3. File › Download › Download .ipynb, save as `results/vector_search_demo_executed.ipynb`.
 
 Record the full results table (method, bits, compression, build_s, QPS, R1@1/4/16/64, 10@10) and the re-rank line. Expect FAISS PQ 4-bit (LUT256) training to take several minutes at d = 1536; that is the point of the comparison. If it takes more than about 15 minutes, lower `TRAIN` to 10,000 rows and note it.
 
@@ -126,6 +107,8 @@ Sanity checks: TurboQuant and turbovec should beat PQ on R1@1 at equal bits (pap
 Optional: rerun with `DATASET = "dbpedia-3072"`.
 
 ### T4. Optional: vLLM production kernels (Ampere/Hopper GPU, vLLM 0.20.2 or later)
+
+Only on a Colab runtime with an Ampere or newer GPU (L4 or A100, paid tiers), never locally; skip it if none is available. Run the commands below in a Colab terminal or `!` cells.
 
 ```bash
 pip install -U vllm
